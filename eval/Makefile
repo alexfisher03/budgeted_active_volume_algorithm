@@ -2,7 +2,7 @@ CXX      := g++
 CXXFLAGS := -std=c++17 -Wall -Wextra -pedantic
 CPPFLAGS := -Iinclude $(shell pkg-config --cflags nlohmann_json 2>/dev/null || echo -I/opt/homebrew/include)
 
-TARGET := predicate_eval
+TARGET := predicate
 SRCS   := src/main.cpp src/test_predicate.cpp src/parser.cpp src/evaluator.cpp src/predicate_dag.cpp
 OBJS   := $(SRCS:.cpp=.o)
 
