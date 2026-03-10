@@ -1,3 +1,4 @@
+#include "store_all_scheduler.hpp"
 #include "test_predicate.hpp"
 
 #include <cstring>
@@ -11,6 +12,7 @@ static void print_usage(const char *prog) {
             << "\n"
             << "Options:\n"
             << "  --test-predicate [path]   Run predicate self-test\n"
+            << "  --run-store-all  [path]   Run store-all scheduler\n"
             << "  --help                    Show this message\n";
 }
 
@@ -28,6 +30,14 @@ int main(int argc, char *argv[]) {
           path = argv[++i];
         }
         return run_predicate_self_test(path);
+      }
+
+      if (std::strcmp(argv[i], "--run-store-all") == 0) {
+        std::string path = kDefaultJsonPath;
+        if (i + 1 < argc && argv[i + 1][0] != '-') {
+          path = argv[++i];
+        }
+        return run_store_all_demo(path);
       }
 
       if (std::strcmp(argv[i], "--help") == 0) {
