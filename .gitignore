@@ -1,0 +1,16 @@
+*.o
+*.exe
+*.out
+*.bin
+*.hex
+*.txt
+*.log
+*.csv
+*.json
+*.yaml
+*.yml
+*.xml
+*.html
+*.css
+
+predicate_eval
