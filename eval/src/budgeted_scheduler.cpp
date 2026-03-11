@@ -338,3 +338,47 @@ int run_oldest_live_demo(const std::string &json_path, std::size_t budget) {
   std::cout << "\n";
   return result.feasible ? 0 : 1;
 }
+
+// budget-list sweep
+
+int run_budget_list(const std::string &json_path, std::size_t lo,
+                    std::size_t hi, const std::string &out_path) {
+  PredicateDag dag = load_predicate(json_path);
+
+  std::ostream *out = &std::cout;
+  std::ofstream file;
+  if (!out_path.empty()) {
+    file.open(out_path);
+    if (!file.is_open()) {
+      std::cerr << "Error: cannot open output file: " << out_path << "\n";
+      return 1;
+    }
+    out = &file;
+  }
+
+  *out << "# policy: oldest-live\n";
+  *out << "# dag: " << dag.export_id << " (" << dag.nodes.size()
+       << " internal nodes)\n\n";
+
+  OldestLivePolicy policy;
+  BudgetedScheduler scheduler;
+
+  for (std::size_t b = lo; b <= hi; ++b) {
+    BudgetedScheduleResult r = scheduler.run(dag, b, policy);
+    const auto &m = r.metrics;
+    *out << "B = " << b << "\n";
+    *out << "  feasible             = " << (r.feasible ? "yes" : "no") << "\n";
+    *out << "  peak_active_volume   = " << m.peak_active_volume << "\n";
+    *out << "  total_compute_ops    = " << m.total_compute_ops << "\n";
+    *out << "  total_uncompute_ops  = " << m.total_uncompute_ops << "\n";
+    *out << "  total_recomputations = " << m.total_recomputations << "\n";
+    *out << "  total_cost           = " << m.total_cost << "\n";
+    if (b < hi)
+      *out << "\n";
+  }
+
+  if (!out_path.empty())
+    std::cerr << "Wrote " << (hi - lo + 1) << " rows to " << out_path << "\n";
+
+  return 0;
+}
