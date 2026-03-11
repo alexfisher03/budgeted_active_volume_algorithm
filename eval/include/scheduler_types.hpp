@@ -26,6 +26,7 @@ struct ScheduleState {
   std::set<int> live_nodes;
   std::unordered_map<int, int> compute_count;
   std::unordered_map<int, int> uncompute_count;
+  std::unordered_map<int, std::size_t> live_since_step;
   std::vector<ScheduleAction> actions;
   std::size_t peak_active_volume = 0;
   int root_node_id = -1;
