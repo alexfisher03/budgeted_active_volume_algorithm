@@ -13,21 +13,20 @@
 // finds a minimum-cost legal schedule under AV <= B by exhaustive
 // shortest-path search over the configuration graph
 //
-// state representation:
-//   - live-set as a bitmask (uint32_t, supports up to 32 internal nodes)
-//   - root_used flag
-//   - combined into a single uint64_t key: (root_used << 32) | mask
+// state: uint64_t with bits 0..62 = live-set mask, bit 63 = root_used
+// supports up to 63 internal nodes
 //
-// start state: live-set = empty, root_used = false
-// goal state:  live-set = empty, root_used = true
+// start: live-set = empty, root_used = false
+// goal:  live-set = empty, root_used = true
 //
 // transitions:
-//   Compute(v):   cost 1, add v to live-set (requires fanins available, |L|+1 <= B)
-//   Uncompute(v): cost 1, remove v from live-set (requires v live, fanins available)
-//   UseRoot:      cost 0, set root_used (requires root live)
+//   compute(v):   cost 1, requires fanins available, |L|+1 <= B
+//   uncompute(v): cost 1, requires v live, fanins available
+//   use_root:     cost 0, requires root live
 //
-// search: Dijkstra's algorithm with predecessor tracking
-// trace: reconstructed from predecessor links after reaching goal
+// search: dijkstra with predecessor tracking
+// B >= N shortcut: returns store-all (provably optimal)
+// state limit: bails out at 50M states explored
 
 struct ExactOptimalResult {
   bool feasible = false;
@@ -43,15 +42,12 @@ public:
   ExactOptimalResult run(const PredicateDag &dag, std::size_t budget) const;
 };
 
-// print full action trace and metrics for an exact optimal result
 void print_exact_optimal_trace(const ExactOptimalResult &result,
                                const PredicateDag &dag);
 
 void print_exact_optimal_metrics(const ExactOptimalResult &result);
 
-// CLI entry: single budget run
 int run_exact_optimal_demo(const std::string &json_path, std::size_t budget);
 
-// CLI entry: budget sweep
 int run_exact_optimal_budget_list(const std::string &json_path, std::size_t lo,
                                   std::size_t hi, const std::string &out_path);

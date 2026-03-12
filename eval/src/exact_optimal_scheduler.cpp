@@ -2,33 +2,30 @@
 #include "parser.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <fstream>
 #include <iostream>
 #include <queue>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
-// ============================================================
 // compact node indexing
 //
-// DAG node ids (e.g. 11..26) are mapped to compact bit positions
+// dag node ids (e.g. 12..52) are mapped to compact bit positions
 // [0..N-1] for bitmask operations
-// ============================================================
 
 struct CompactIndex {
-  std::vector<int> index_to_node; // compact index -> node_id
-  std::unordered_map<int, int> node_to_index; // node_id -> compact index
-  int N = 0; // number of internal nodes
+  std::vector<int> index_to_node;
+  std::unordered_map<int, int> node_to_index;
+  int N = 0;
 
   // precomputed per-node fanin info in compact index space
-  // for each compact index i:
-  //   fanin_mask[i] = bitmask of internal fanin nodes
-  //   fanin_all_external[i] = true if both fanins are inputs/constants
-  std::vector<uint32_t> fanin_mask;
+  std::vector<uint64_t> fanin_mask;
   std::vector<bool> fanin_all_external;
 
-  int root_index = -1; // compact index of the root node
+  int root_index = -1;
 };
 
 static CompactIndex build_compact_index(const PredicateDag &dag) {
@@ -42,9 +39,12 @@ static CompactIndex build_compact_index(const PredicateDag &dag) {
   std::sort(sorted_ids.begin(), sorted_ids.end());
 
   ci.N = static_cast<int>(sorted_ids.size());
+  assert(ci.N <= 63 && "more than 63 internal nodes not supported");
+
   ci.index_to_node.resize(static_cast<std::size_t>(ci.N));
   for (int i = 0; i < ci.N; ++i) {
-    ci.index_to_node[static_cast<std::size_t>(i)] = sorted_ids[static_cast<std::size_t>(i)];
+    ci.index_to_node[static_cast<std::size_t>(i)] =
+        sorted_ids[static_cast<std::size_t>(i)];
     ci.node_to_index[sorted_ids[static_cast<std::size_t>(i)]] = i;
   }
 
@@ -61,7 +61,7 @@ static CompactIndex build_compact_index(const PredicateDag &dag) {
   }
 
   // precompute fanin masks
-  ci.fanin_mask.resize(static_cast<std::size_t>(ci.N), 0);
+  ci.fanin_mask.resize(static_cast<std::size_t>(ci.N), 0ULL);
   ci.fanin_all_external.resize(static_cast<std::size_t>(ci.N), true);
 
   for (int i = 0; i < ci.N; ++i) {
@@ -71,18 +71,17 @@ static CompactIndex build_compact_index(const PredicateDag &dag) {
       continue;
     const AndNode *node = nit->second;
 
-    uint32_t mask = 0;
+    uint64_t mask = 0ULL;
     for (int lit : {node->lhs_lit, node->rhs_lit}) {
       if (is_constant_false(lit) || is_constant_true(lit))
         continue;
       int base = positive_base_literal(lit);
       if (dag.input_lit_set.count(base))
         continue;
-      // internal fanin
       int fanin_nid = node_id_from_positive_literal(base);
       auto fit = ci.node_to_index.find(fanin_nid);
       if (fit != ci.node_to_index.end()) {
-        mask |= (1u << fit->second);
+        mask |= (1ULL << fit->second);
         ci.fanin_all_external[static_cast<std::size_t>(i)] = false;
       }
     }
@@ -92,68 +91,110 @@ static CompactIndex build_compact_index(const PredicateDag &dag) {
   return ci;
 }
 
-// ============================================================
-// bitmask helpers
-// ============================================================
+// bitmask helpers (uint64_t, supports up to 63 nodes)
 
-static inline bool is_live(uint32_t mask, int idx) {
-  return (mask & (1u << idx)) != 0;
+static inline bool is_live(uint64_t mask, int idx) {
+  return (mask & (1ULL << idx)) != 0;
 }
 
-static inline uint32_t set_live(uint32_t mask, int idx) {
-  return mask | (1u << idx);
+static inline uint64_t set_live(uint64_t mask, int idx) {
+  return mask | (1ULL << idx);
 }
 
-static inline uint32_t clear_live(uint32_t mask, int idx) {
-  return mask & ~(1u << idx);
+static inline uint64_t clear_live(uint64_t mask, int idx) {
+  return mask & ~(1ULL << idx);
 }
 
-static inline int popcount32(uint32_t x) { return __builtin_popcount(x); }
+static inline int popcount64(uint64_t x) { return __builtin_popcountll(x); }
 
-// check if all fanins of compact node idx are available under mask
-// (inputs/constants are always available so only internal fanins matter)
-static inline bool fanins_available(uint32_t mask, int idx,
+// fanin availability check in compact index space
+static inline bool fanins_available(uint64_t mask, int idx,
                                     const CompactIndex &ci) {
   if (ci.fanin_all_external[static_cast<std::size_t>(idx)])
     return true;
-  uint32_t needed = ci.fanin_mask[static_cast<std::size_t>(idx)];
+  uint64_t needed = ci.fanin_mask[static_cast<std::size_t>(idx)];
   return (mask & needed) == needed;
 }
 
-// ============================================================
 // state encoding
 //
-// state = (mask, root_used) packed into uint64_t
-// low 32 bits: live-set bitmask
-// bit 32: root_used flag
-// ============================================================
+// single uint64_t: bits 0..62 = live-set mask, bit 63 = root_used
+// supports up to 63 internal nodes
 
-static inline uint64_t encode_state(uint32_t mask, bool root_used) {
-  return static_cast<uint64_t>(mask) |
-         (root_used ? (1ULL << 32) : 0ULL);
+static inline uint64_t encode_state(uint64_t mask, bool root_used) {
+  return mask | (root_used ? (1ULL << 63) : 0ULL);
 }
 
-static inline uint32_t decode_mask(uint64_t state) {
-  return static_cast<uint32_t>(state & 0xFFFFFFFFULL);
+static inline uint64_t decode_mask(uint64_t state) {
+  return state & 0x7FFFFFFFFFFFFFFFULL;
 }
 
 static inline bool decode_root_used(uint64_t state) {
-  return (state & (1ULL << 32)) != 0;
+  return (state >> 63) != 0;
 }
 
-// ============================================================
-// edge / action in the configuration graph
-// ============================================================
+// edge in the configuration graph
 
 struct CfgEdge {
   ScheduleOpType op;
-  int compact_index; // which node was computed/uncomputed (-1 for UseRoot)
-  uint32_t cost;     // 1 for compute/uncompute, 0 for UseRoot
+  int compact_index;
+  uint32_t cost;
 };
 
-// ============================================================
-// Dijkstra search
-// ============================================================
+// maximum states explored before bailing out
+static constexpr std::size_t MAX_STATES = 50'000'000;
+
+// build the store-all schedule for the B >= N shortcut
+// this is provably optimal: cost = 2*N, 0 recomputations
+static ExactOptimalResult
+build_store_all_result(const PredicateDag & /*dag*/, const CompactIndex &ci,
+                       std::size_t budget) {
+  ExactOptimalResult result;
+  result.feasible = true;
+  result.budget = budget;
+  result.root_node_id =
+      ci.index_to_node[static_cast<std::size_t>(ci.root_index)];
+  result.states_explored = 0;
+
+  std::size_t N = static_cast<std::size_t>(ci.N);
+
+  // topological order: compute all nodes in sorted id order
+  // then use root, then uncompute all in reverse order
+  std::vector<int> topo;
+  topo.reserve(N);
+  for (int i = 0; i < ci.N; ++i)
+    topo.push_back(ci.index_to_node[static_cast<std::size_t>(i)]);
+
+  std::size_t step = 0;
+
+  // compute phase
+  for (std::size_t i = 0; i < N; ++i) {
+    result.actions.push_back(
+        {ScheduleOpType::Compute, topo[i], i + 1, step++});
+  }
+
+  // use root
+  result.actions.push_back(
+      {ScheduleOpType::UseRoot, result.root_node_id, N, step++});
+
+  // uncompute phase (reverse order)
+  for (std::size_t i = N; i > 0; --i) {
+    result.actions.push_back(
+        {ScheduleOpType::Uncompute, topo[i - 1], i - 1, step++});
+  }
+
+  auto &m = result.metrics;
+  m.peak_active_volume = N;
+  m.total_compute_ops = N;
+  m.total_uncompute_ops = N;
+  m.total_recomputations = 0;
+  m.total_cost = 2 * N;
+  m.fallback_evictions = 0;
+
+  return result;
+}
+
+// dijkstra search over the configuration graph
 
 ExactOptimalResult
 ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
@@ -163,23 +204,27 @@ ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
   CompactIndex ci = build_compact_index(dag);
 
   if (ci.root_index < 0) {
-    // root is a constant or input — no schedule needed
     result.feasible = false;
     return result;
   }
 
-  result.root_node_id = ci.index_to_node[static_cast<std::size_t>(ci.root_index)];
+  result.root_node_id =
+      ci.index_to_node[static_cast<std::size_t>(ci.root_index)];
 
+  int N = ci.N;
   int B = static_cast<int>(budget);
 
-  // start state: empty live-set, root_used = false
-  uint64_t start = encode_state(0, false);
-  // goal state: empty live-set, root_used = true
-  uint64_t goal = encode_state(0, true);
+  // shortcut: B >= N means store-all is optimal
+  if (B >= N)
+    return build_store_all_result(dag, ci, budget);
+
+  // start and goal states
+  uint64_t start = encode_state(0ULL, false);
+  uint64_t goal = encode_state(0ULL, true);
 
   // dist[state] = best known cost to reach state
   std::unordered_map<uint64_t, uint32_t> dist;
-  // pred[state] = (predecessor_state, edge that led here)
+  // pred[state] = predecessor state and edge
   struct PredInfo {
     uint64_t pred_state;
     CfgEdge edge;
@@ -206,9 +251,15 @@ ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
 
     states_explored++;
 
+    // state limit
+    if (states_explored > MAX_STATES) {
+      result.feasible = false;
+      result.states_explored = states_explored;
+      return result;
+    }
+
     // goal check
     if (u == goal) {
-      // reconstruct the optimal trace
       result.feasible = true;
       result.states_explored = states_explored;
 
@@ -224,16 +275,17 @@ ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
       }
       std::reverse(rev_edges.begin(), rev_edges.end());
 
-      // convert edges to ScheduleActions and compute metrics
-      uint32_t cur_mask = 0;
+      // replay trace to compute metrics
+      uint64_t cur_mask = 0ULL;
       std::size_t step = 0;
       std::size_t peak_av = 0;
       std::unordered_map<int, int> compute_count;
 
       for (const auto &e : rev_edges) {
-        int node_id = (e.compact_index >= 0)
-                          ? ci.index_to_node[static_cast<std::size_t>(e.compact_index)]
-                          : result.root_node_id;
+        int node_id =
+            (e.compact_index >= 0)
+                ? ci.index_to_node[static_cast<std::size_t>(e.compact_index)]
+                : result.root_node_id;
 
         switch (e.op) {
         case ScheduleOpType::Compute:
@@ -247,7 +299,8 @@ ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
           break;
         }
 
-        std::size_t live_count = static_cast<std::size_t>(popcount32(cur_mask));
+        std::size_t live_count =
+            static_cast<std::size_t>(popcount64(cur_mask));
         if (live_count > peak_av)
           peak_av = live_count;
 
@@ -255,7 +308,7 @@ ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
         step++;
       }
 
-      // derive metrics from the reconstructed trace
+      // derive metrics
       ScheduleMetrics &m = result.metrics;
       m.peak_active_volume = peak_av;
       m.total_compute_ops = 0;
@@ -272,31 +325,46 @@ ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
 
       for (const auto &[nid, cnt] : compute_count) {
         if (cnt > 1)
-          m.total_recomputations += static_cast<std::size_t>(cnt - 1);
+          m.total_recomputations +=
+              static_cast<std::size_t>(cnt - 1);
       }
 
-      // cost = total_compute_ops + total_uncompute_ops (unit cost model)
       m.total_cost = m.total_compute_ops + m.total_uncompute_ops;
+
+      // lower-bound assertions
+      std::size_t uN = static_cast<std::size_t>(N);
+      assert(m.total_compute_ops >= uN &&
+             "exact-optimal: compute_ops < node count");
+      assert(m.total_uncompute_ops >= uN &&
+             "exact-optimal: uncompute_ops < node count");
+      assert(m.total_cost >= 2 * uN &&
+             "exact-optimal: cost < 2 * node count");
+      assert(m.peak_active_volume <= budget &&
+             "exact-optimal: peak_av exceeded budget");
+
+      // distinct computed nodes must equal N
+      std::size_t distinct_computed = compute_count.size();
+      assert(distinct_computed == uN &&
+             "exact-optimal: not all nodes were computed");
 
       return result;
     }
 
-    uint32_t mask = decode_mask(u);
+    uint64_t mask = decode_mask(u);
     bool root_used = decode_root_used(u);
 
     // generate successors
 
-    // 1. Compute(v) for each non-live node whose fanins are available
-    //    and resulting live-set size <= B
-    int live_count = popcount32(mask);
+    // 1. compute(v) for each non-live node whose fanins are available
+    int live_count = popcount64(mask);
     if (live_count < B) {
-      for (int i = 0; i < ci.N; ++i) {
+      for (int i = 0; i < N; ++i) {
         if (is_live(mask, i))
           continue;
         if (!fanins_available(mask, i, ci))
           continue;
 
-        uint32_t new_mask = set_live(mask, i);
+        uint64_t new_mask = set_live(mask, i);
         uint64_t v = encode_state(new_mask, root_used);
         uint32_t new_cost = d + 1;
 
@@ -309,14 +377,14 @@ ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
       }
     }
 
-    // 2. Uncompute(v) for each live node whose fanins are available
-    for (int i = 0; i < ci.N; ++i) {
+    // 2. uncompute(v) for each live node whose fanins are available
+    for (int i = 0; i < N; ++i) {
       if (!is_live(mask, i))
         continue;
       if (!fanins_available(mask, i, ci))
         continue;
 
-      uint32_t new_mask = clear_live(mask, i);
+      uint64_t new_mask = clear_live(mask, i);
       uint64_t v = encode_state(new_mask, root_used);
       uint32_t new_cost = d + 1;
 
@@ -328,10 +396,10 @@ ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
       }
     }
 
-    // 3. UseRoot if root is live and not yet used
+    // 3. use root if root is live and not yet used
     if (!root_used && is_live(mask, ci.root_index)) {
       uint64_t v = encode_state(mask, true);
-      uint32_t new_cost = d; // UseRoot cost = 0
+      uint32_t new_cost = d;
 
       auto vit = dist.find(v);
       if (vit == dist.end() || new_cost < vit->second) {
@@ -348,9 +416,7 @@ ExactOptimalScheduler::run(const PredicateDag &dag, std::size_t budget) const {
   return result;
 }
 
-// ============================================================
-// printing helpers
-// ============================================================
+// printing
 
 static const char *eo_op_name(ScheduleOpType op) {
   switch (op) {
@@ -376,7 +442,6 @@ void print_exact_optimal_trace(const ExactOptimalResult &result,
   if (!result.feasible)
     return;
 
-  // topological order
   std::vector<int> topo;
   for (const auto &n : dag.nodes)
     topo.push_back(n.id);
@@ -414,9 +479,7 @@ void print_exact_optimal_metrics(const ExactOptimalResult &result) {
   std::cout << "  states_explored      = " << result.states_explored << "\n";
 }
 
-// ============================================================
-// CLI entry points
-// ============================================================
+// cli entry points
 
 int run_exact_optimal_demo(const std::string &json_path, std::size_t budget) {
   std::cout << "Loading predicate from: " << json_path << "\n";
