@@ -142,7 +142,7 @@ struct CfgEdge {
 };
 
 // maximum states explored before bailing out
-static constexpr std::size_t MAX_STATES = 50'000'000;
+static constexpr std::size_t MAX_STATES = 500'000'000;
 
 // build the store-all schedule for the B >= N shortcut
 // this is provably optimal: cost = 2*N, 0 recomputations
