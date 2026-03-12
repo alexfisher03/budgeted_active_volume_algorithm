@@ -16,3 +16,17 @@
 predicate_eval
 results_test1/
 results_test2/
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+*.pyzwzw
+*.pyzwzwz
+
+plotting/output
