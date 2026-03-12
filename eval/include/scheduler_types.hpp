@@ -20,6 +20,7 @@ struct ScheduleMetrics {
   std::size_t total_uncompute_ops = 0;
   std::size_t total_recomputations = 0;
   std::size_t total_cost = 0;
+  std::size_t fallback_evictions = 0;
 };
 
 struct ScheduleState {
@@ -31,4 +32,5 @@ struct ScheduleState {
   std::size_t peak_active_volume = 0;
   int root_node_id = -1;
   bool root_used = false;
+  std::size_t fallback_evictions = 0;
 };

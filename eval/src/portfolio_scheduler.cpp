@@ -9,11 +9,8 @@
 #include <iostream>
 #include <vector>
 
-// portfolio scheduler::run
-//
-// instantiates the three portfolio member policies, runs each 
-// independently through the generic BudgetedScheduler, then selects the 
-// best feasible result by the deterministic tie-breaking rule
+// run all three portfolio members independently through the budgeted
+// scheduler and select the best feasible result by tie-break
 
 PortfolioResult PortfolioScheduler::run(const PredicateDag &dag,
                                         std::size_t budget,
@@ -39,12 +36,7 @@ PortfolioResult PortfolioScheduler::run(const PredicateDag &dag,
     result.member_results.push_back(scheduler.run(dag, budget, *policies[i]));
   }
 
-  // selection 
-  // find the best feasible result using the deterministic tie-break:
-  //   1. lower total_cost
-  //   2. lower peak_active_volume
-  //   3. lower total_recomputations
-  //   4. lower policy index (fixed priority order)
+  // deterministic tie-break: cost, peak_av, recomps, index
 
   result.winner_index = -1;
   result.feasible = false;
@@ -66,7 +58,7 @@ PortfolioResult PortfolioScheduler::run(const PredicateDag &dag,
     const auto &m_new = r.metrics;
     const auto &m_old = cur_best.metrics;
 
-    // Tie-break cascade:
+    // tie-break cascade
     if (m_new.total_cost < m_old.total_cost) {
       result.winner_index = static_cast<int>(i);
     } else if (m_new.total_cost == m_old.total_cost) {
@@ -76,8 +68,7 @@ PortfolioResult PortfolioScheduler::run(const PredicateDag &dag,
         if (m_new.total_recomputations < m_old.total_recomputations) {
           result.winner_index = static_cast<int>(i);
         }
-        // if all three criteria are equal, the current winner (lower index) keeps its position 
-        // this is the fixed priority tie-break
+        // all equal: lower index keeps position
       }
     }
   }
@@ -85,7 +76,7 @@ PortfolioResult PortfolioScheduler::run(const PredicateDag &dag,
   return result;
 }
 
-// printing helpers
+// printing
 
 void print_portfolio_summary(const PortfolioResult &result,
                              const PredicateDag & /*dag*/) {
@@ -113,6 +104,8 @@ void print_portfolio_summary(const PortfolioResult &result,
     std::cout << "      total_recomputations = " << m.total_recomputations
               << "\n";
     std::cout << "      total_cost           = " << m.total_cost << "\n";
+    std::cout << "      fallback_evictions   = " << m.fallback_evictions
+              << "\n";
   }
 
   if (result.feasible) {
@@ -128,6 +121,8 @@ void print_portfolio_summary(const PortfolioResult &result,
     std::cout << "  total_recomputations = " << w.metrics.total_recomputations
               << "\n";
     std::cout << "  total_cost           = " << w.metrics.total_cost << "\n";
+    std::cout << "  fallback_evictions   = " << w.metrics.fallback_evictions
+              << "\n";
   } else {
     std::cout << "\n-- Portfolio result: INFEASIBLE --\n";
     std::cout << "  All " << result.member_results.size()
@@ -205,6 +200,7 @@ int run_portfolio_budget_list(const std::string &json_path, std::size_t lo,
       *out << "  total_uncompute_ops  = " << m.total_uncompute_ops << "\n";
       *out << "  total_recomputations = " << m.total_recomputations << "\n";
       *out << "  total_cost           = " << m.total_cost << "\n";
+      *out << "  fallback_evictions   = " << m.fallback_evictions << "\n";
     } else {
       *out << "  feasible             = no\n";
     }

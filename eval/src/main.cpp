@@ -1,5 +1,4 @@
 #include "budgeted_scheduler.hpp"
-#include "diagnose_portfolio.hpp"
 #include "exact_optimal_scheduler.hpp"
 #include "portfolio_scheduler.hpp"
 #include "store_all_scheduler.hpp"
@@ -30,8 +29,6 @@ static void print_usage(const char *prog) {
             << "                                   Single budget, exact optimal\n"
             << "  --run-exact-optimal [path] --budget-list <lo:hi> [--out <file>]\n"
             << "                                   Sweep budgets, exact optimal\n"
-            << "  --diagnose-portfolio [path] --budget <B>\n"
-            << "                                   Full eviction diagnostics\n"
             << "  --help                           Show this message\n";
 }
 
@@ -265,35 +262,6 @@ int main(int argc, char *argv[]) {
         if (have_list)
           return run_exact_optimal_budget_list(path, list_lo, list_hi, out_path);
         return run_exact_optimal_demo(path, budget);
-      }
-
-      if (std::strcmp(argv[i], "--diagnose-portfolio") == 0) {
-        std::string path = kDefaultJsonPath;
-        std::size_t budget = 0;
-        bool have_budget = false;
-
-        while (i + 1 < argc) {
-          if (std::strcmp(argv[i + 1], "--budget") == 0) {
-            if (i + 2 >= argc) {
-              std::cerr << "Error: --budget requires a value\n";
-              return 1;
-            }
-            budget = static_cast<std::size_t>(std::stoull(argv[i + 2]));
-            have_budget = true;
-            i += 2;
-          } else if (argv[i + 1][0] != '-') {
-            path = argv[++i];
-          } else {
-            break;
-          }
-        }
-
-        if (!have_budget) {
-          std::cerr << "Error: --diagnose-portfolio requires --budget <B>\n";
-          return 1;
-        }
-
-        return run_diagnose_portfolio(path, budget);
       }
 
       if (std::strcmp(argv[i], "--help") == 0) {

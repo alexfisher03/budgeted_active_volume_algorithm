@@ -90,6 +90,8 @@ static ScheduleMetrics compute_metrics(const ScheduleState &state) {
     sum_cost += static_cast<std::size_t>(count);
   m.total_cost = 2 * sum_cost;
 
+  m.fallback_evictions = state.fallback_evictions;
+
   return m;
 }
 
@@ -180,6 +182,7 @@ bool BudgetedScheduler::ensure_live(
       if (!victim.has_value())
         return false;
       bdo_uncompute(*victim, state, dag);
+      state.fallback_evictions++;
     }
   }
 
@@ -364,6 +367,7 @@ void print_budgeted_schedule_metrics(const BudgetedScheduleResult &result) {
   std::cout << "  total_uncompute_ops  = " << m.total_uncompute_ops << "\n";
   std::cout << "  total_recomputations = " << m.total_recomputations << "\n";
   std::cout << "  total_cost           = " << m.total_cost << "\n";
+  std::cout << "  fallback_evictions   = " << m.fallback_evictions << "\n";
 }
 
 // runners
@@ -421,6 +425,7 @@ int run_budget_list(const std::string &json_path, std::size_t lo,
     *out << "  total_uncompute_ops  = " << m.total_uncompute_ops << "\n";
     *out << "  total_recomputations = " << m.total_recomputations << "\n";
     *out << "  total_cost           = " << m.total_cost << "\n";
+    *out << "  fallback_evictions   = " << m.fallback_evictions << "\n";
     if (b < hi)
       *out << "\n";
   }
