@@ -3,12 +3,13 @@
 #include "parser.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
 
-// scheduling steps (budgeted versions with live_since_step)
+// scheduling primitives
 
 static void bdo_compute(int node_id, ScheduleState &state,
                         const PredicateDag &dag) {
@@ -63,7 +64,7 @@ static void bdo_use_root(ScheduleState &state) {
       {ScheduleOpType::UseRoot, state.root_node_id, live_count, step});
 }
 
-// metrics computation
+// metrics
 
 static ScheduleMetrics compute_metrics(const ScheduleState &state) {
   ScheduleMetrics m;
@@ -83,14 +84,38 @@ static ScheduleMetrics compute_metrics(const ScheduleState &state) {
       m.total_recomputations += static_cast<std::size_t>(count - 1);
   }
 
-  // Unit-cost model: total_cost = 2 * sum_v compute_count(v)
-  // treating tau(v) = 1 for this experiment
+  // unit-cost model: total_cost = 2 * sum_v compute_count(v)
   std::size_t sum_cost = 0;
   for (const auto &[nid, count] : state.compute_count)
     sum_cost += static_cast<std::size_t>(count);
   m.total_cost = 2 * sum_cost;
 
   return m;
+}
+
+// check whether evicting candidate would strand any currently-uncomputable
+// live node, i.e. turn it into a zombie by killing one of its fanins
+static bool would_strand_live_node(int candidate,
+                                   const ScheduleState &state,
+                                   const PredicateDag &dag) {
+  for (int w : state.live_nodes) {
+    if (w == candidate)
+      continue;
+    // only care about nodes that are currently uncomputable;
+    // if w is already a zombie removing candidate doesnt make it worse
+    if (!sched::can_uncompute(w, state, dag))
+      continue;
+    auto wit = dag.node_by_id.find(w);
+    if (wit == dag.node_by_id.end())
+      continue;
+    const AndNode *wnode = wit->second;
+    for (int fl : {wnode->lhs_lit, wnode->rhs_lit}) {
+      int fn = sched::producing_node_id_for_literal(fl, dag);
+      if (fn == candidate)
+        return true;
+    }
+  }
+  return false;
 }
 
 // ensure_live
@@ -103,45 +128,69 @@ bool BudgetedScheduler::ensure_live(
   if (state.live_nodes.count(node_id))
     return true;
 
-  // Build a local protected set.  Starts with whatever the caller needs
-  // protected, plus this node (so it cannot be evicted before it is
-  // computed, but prevents the eviction policy from choosing it in degenerate cases)
-  auto local_protected = inherited_protected; // copy
+  auto local_protected = inherited_protected;
   local_protected.insert(node_id);
 
-  // Recursively ensure internal fanins are live.
-  // After each fanin is ensured live, add it to local_protected so that
-  // the sibling fanin call and the eviction loop below cannot evict it.
-  // crucially, the local copy means nodes added deeper in the recursion
-  // don't accumulate into this level's protected set
   auto it = dag.node_by_id.find(node_id);
   if (it == dag.node_by_id.end())
     throw std::runtime_error("ensure_live: unknown node " +
                              std::to_string(node_id));
   const AndNode *node = it->second;
 
+  // recursively ensure internal fanins are live
   for (int fanin_lit : {node->lhs_lit, node->rhs_lit}) {
     int fanin_nid = sched::producing_node_id_for_literal(fanin_lit, dag);
     if (fanin_nid != -1) {
       if (!ensure_live(fanin_nid, state, dag, budget, policy, local_protected))
         return false;
-      // protect the just-ensured fanin from eviction by sibling calls
-      // and by the eviction loop below
       local_protected.insert(fanin_nid);
     }
   }
 
   // make room if the live set is at budget
   while (state.live_nodes.size() >= budget) {
-    auto victim =
-        policy.choose_eviction_candidate(state, dag, local_protected);
-    if (!victim.has_value())
-      return false; // infeasible under this policy / budget
-    bdo_uncompute(*victim, state, dag);
+    // strand-preferring eviction: try to find a candidate whose removal
+    // does not strand a currently-uncomputable live node.  if no such
+    // candidate exists fall back to the policys original choice -- creating
+    // a zombie is better than declaring infeasible prematurely
+    auto eviction_protected = local_protected;
+    bool evicted = false;
+
+    // phase 1: try to find a strand-safe candidate
+    while (true) {
+      auto victim =
+          policy.choose_eviction_candidate(state, dag, eviction_protected);
+      if (!victim.has_value())
+        break;
+
+      if (!would_strand_live_node(*victim, state, dag)) {
+        bdo_uncompute(*victim, state, dag);
+        evicted = true;
+        break;
+      }
+
+      // would strand -- exclude it and try the next one
+      eviction_protected.insert(*victim);
+    }
+
+    // phase 2: no strand-safe candidate, fall back to original policy choice
+    if (!evicted) {
+      auto victim =
+          policy.choose_eviction_candidate(state, dag, local_protected);
+      if (!victim.has_value())
+        return false;
+      bdo_uncompute(*victim, state, dag);
+    }
   }
 
-  // compute the node
+  assert(state.live_nodes.size() < budget &&
+         "live set must be below budget before compute");
+
   bdo_compute(node_id, state, dag);
+
+  assert(state.live_nodes.size() <= budget &&
+         "live set exceeded budget after compute");
+
   return true;
 }
 
@@ -150,20 +199,15 @@ bool BudgetedScheduler::ensure_live(
 bool BudgetedScheduler::cleanup(ScheduleState &state, const PredicateDag &dag,
                                 std::size_t budget,
                                 const EvictionPolicy &policy) const {
-  // repeatedly pick the highest-id live node and uncompute it
-  // if its fanins are unavailable, re-materialize them first
-  // the highest live id strictly decreases each iteration
-
   while (!state.live_nodes.empty()) {
-    int v = *state.live_nodes.rbegin(); // highest-id live node
+    int v = *state.live_nodes.rbegin();
 
-    // if we can directly uncompute, do so and continue
     if (sched::can_uncompute(v, state, dag)) {
       bdo_uncompute(v, state, dag);
       continue;
     }
 
-    // otherwise, re-materialize missing fanins
+    // re-materialize missing fanins so v can be uncomputed
     auto nit = dag.node_by_id.find(v);
     if (nit == dag.node_by_id.end())
       throw std::runtime_error("cleanup: unknown node " + std::to_string(v));
@@ -181,9 +225,8 @@ bool BudgetedScheduler::cleanup(ScheduleState &state, const PredicateDag &dag,
       }
     }
 
-    // now the fanins should be available
     if (!sched::can_uncompute(v, state, dag))
-      return false; // should not happen if ensure_live succeeded
+      return false;
     bdo_uncompute(v, state, dag);
   }
 
@@ -217,11 +260,12 @@ BudgetedScheduler::run(const PredicateDag &dag, std::size_t budget,
   }
   result.root_node_id = root_node_id;
 
-  // initialize state
+  std::size_t node_count = dag.nodes.size();
+
   ScheduleState state;
   state.root_node_id = root_node_id;
 
-  // phase A: ensure root is live (recursively materializes ancestors)
+  // phase a: ensure root is live
   {
     std::unordered_set<int> protected_set;
     if (!ensure_live(root_node_id, state, dag, budget, policy,
@@ -233,10 +277,10 @@ BudgetedScheduler::run(const PredicateDag &dag, std::size_t budget,
     }
   }
 
-  // phase B: use root
+  // phase b: use root
   bdo_use_root(state);
 
-  // phase C: cleanup — empty the live set
+  // phase c: cleanup
   if (!cleanup(state, dag, budget, policy)) {
     result.feasible = false;
     result.metrics = compute_metrics(state);
@@ -244,11 +288,19 @@ BudgetedScheduler::run(const PredicateDag &dag, std::size_t budget,
     return result;
   }
 
-  // post-condition checks
   if (!state.live_nodes.empty())
     throw std::runtime_error(
         "BudgetedScheduler: live set not empty after cleanup (" +
         std::to_string(state.live_nodes.size()) + " nodes remain)");
+
+  // when budget >= |V| there should be no recomputations
+  if (budget >= node_count) {
+    ScheduleMetrics m = compute_metrics(state);
+    assert(m.total_recomputations == 0 &&
+           "budget >= |V| but recomputations occurred");
+    assert(m.total_compute_ops == node_count &&
+           "budget >= |V| but compute_ops != |V|");
+  }
 
   result.feasible = true;
   result.metrics = compute_metrics(state);
@@ -256,7 +308,7 @@ BudgetedScheduler::run(const PredicateDag &dag, std::size_t budget,
   return result;
 }
 
-// printing helpers
+// printing
 
 static const char *op_name(ScheduleOpType op) {
   switch (op) {
@@ -278,7 +330,6 @@ void print_budgeted_schedule_trace(const BudgetedScheduleResult &result,
   std::cout << "  result = " << (result.feasible ? "FEASIBLE" : "INFEASIBLE")
             << "\n";
 
-  // topological order
   std::vector<int> topo;
   for (const auto &n : dag.nodes)
     topo.push_back(n.id);
@@ -296,7 +347,6 @@ void print_budgeted_schedule_trace(const BudgetedScheduleResult &result,
   std::cout << "  root_lit=" << dag.root_lit
             << "  root_node_id=" << result.root_node_id << "\n";
 
-  // action trace
   std::cout << "\n-- Schedule trace (" << result.actions.size()
             << " actions) --\n";
   for (const auto &a : result.actions) {
@@ -316,7 +366,7 @@ void print_budgeted_schedule_metrics(const BudgetedScheduleResult &result) {
   std::cout << "  total_cost           = " << m.total_cost << "\n";
 }
 
-// demo runner
+// runners
 
 int run_oldest_live_demo(const std::string &json_path, std::size_t budget) {
   std::cout << "Loading predicate from: " << json_path << "\n";
@@ -338,8 +388,6 @@ int run_oldest_live_demo(const std::string &json_path, std::size_t budget) {
   std::cout << "\n";
   return result.feasible ? 0 : 1;
 }
-
-// budget-list sweep
 
 int run_budget_list(const std::string &json_path, std::size_t lo,
                     std::size_t hi, const std::string &out_path) {
