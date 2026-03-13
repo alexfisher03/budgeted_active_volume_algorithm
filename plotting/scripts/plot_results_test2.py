@@ -98,7 +98,8 @@ def _build_exact_estimate(series_map, y_field, trivial_val, max_band_half):
     portfolio_pts = {p.budget: getattr(p, y_field)
                      for p in series_map["portfolio-best"].feasible_points()}
 
-    b0, y0 = 8.0, float(exact_pts[8])
+    last_cert_b = max(exact_pts.keys())
+    b0, y0 = float(last_cert_b), float(exact_pts[last_cert_b])
     b1, y1 = float(N_NODES), float(trivial_val)
     span = b1 - b0
 
@@ -161,11 +162,6 @@ def _add_exact_visuals(ax, series_map, y_field, trivial_val, max_band_half,
         color=style["color"], linestyle="-", linewidth=1.4,
         zorder=style["zorder"],
         label=style["label"] if with_labels else None)
-
-    ax.plot(
-        [N_NODES], [trivial_val], marker=style["marker"],
-        markersize=style["markersize"], color=style["color"],
-        linestyle="none", zorder=style["zorder"])
 
 
 def _plot_heuristics(ax, series_map, y_field):

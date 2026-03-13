@@ -6,7 +6,7 @@ SCHEDULER_STYLE = {
     "exact-optimal": {
         "color": "#000000",
         "marker": "D",
-        "markersize": 4,
+        "markersize": 3.2,
         "linewidth": 1.6,
         "linestyle": "-",
         "zorder": 10,
